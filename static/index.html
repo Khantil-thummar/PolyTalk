@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Audio Exchange</title>
+</head>
+<body>
+    <h1>WebSocket Audio Exchange</h1>
+    <button onclick="startRecording()">Start Call</button>
+    <button onclick="stopRecording()">Stop Call</button>
+
+    <script>
+        const ws = new WebSocket("{{WEBSOCKET_URL}}");  // Placeholder
+
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        const audioContext = new AudioContext();
+
+        ws.onmessage = async function(event) {
+            const arrayBuffer = await event.data.arrayBuffer();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+        };
+
+        function startRecording() {
+            if (isRecording) return;
+
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    mediaRecorder = new MediaRecorder(stream);
+                    mediaRecorder.ondataavailable = event => {
+                        audioChunks.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        ws.send(audioBlob);
+                        audioChunks = [];
+                    };
+
+                    mediaRecorder.start();
+                    isRecording = true;
+
+                    setInterval(() => {
+                        if (isRecording && mediaRecorder.state === "recording") {
+                            mediaRecorder.stop();
+                            mediaRecorder.start();
+                        }
+                    }, 1000);
+                })
+                .catch(err => console.log('Error accessing microphone:', err));
+        }
+
+        function stopRecording() {
+            if (!isRecording) return;
+            mediaRecorder.stop();
+            isRecording = false;
+        }
+    </script>
+</body>
+</html>
