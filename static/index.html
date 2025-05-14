@@ -29,7 +29,7 @@
     let audioContext, processor, input, stream, socket;
     let recording = false;
     let bufferQueue = [];
-    const chunkSize = 88200; // ~1 second of audio (44.1kHz * 2 bytes per sample * 1 channel)
+    const chunkSize = 176400;
 
     document.getElementById("startBtn").onclick = async () => {
       try {
