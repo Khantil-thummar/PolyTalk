@@ -1,65 +1,80 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebSocket Audio Exchange</title>
+  <title>WebSocket Audio Stream</title>
 </head>
 <body>
-    <h1>WebSocket Audio Exchange</h1>
-    <button onclick="startRecording()">Start Call</button>
-    <button onclick="stopRecording()">Stop Call</button>
+  <h1>Live Audio Streaming</h1>
+  <button id="startBtn">Start</button>
+  <button id="stopBtn" disabled>Stop</button>
 
-    <script>
-        const ws = new WebSocket("{{WEBSOCKET_URL}}");  // Placeholder
+  <script>
+    let audioContext, processor, input, stream, socket;
+    let recording = false;
+  
+    document.getElementById("startBtn").onclick = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("Microphone access granted");
+  
+        socket = new WebSocket("wss://" + location.host + "/ws/audio");
 
-        let mediaRecorder;
-        let audioChunks = [];
-        let isRecording = false;
-
-        const audioContext = new AudioContext();
-
-        ws.onmessage = async function(event) {
-            const arrayBuffer = await event.data.arrayBuffer();
-            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-            const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContext.destination);
-            source.start();
+        socket.binaryType = "arraybuffer";
+  
+        audioContext = new AudioContext({ sampleRate: 44100 });
+        input = audioContext.createMediaStreamSource(stream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+  
+        input.connect(processor);
+        processor.connect(audioContext.destination);
+  
+        processor.onaudioprocess = (e) => {
+          if (!recording || socket.readyState !== WebSocket.OPEN) return;
+  
+          const inputData = e.inputBuffer.getChannelData(0);
+          const buffer = new ArrayBuffer(inputData.length * 2);
+          const view = new DataView(buffer);
+  
+          for (let i = 0; i < inputData.length; i++) {
+            let s = Math.max(-1, Math.min(1, inputData[i]));
+            view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+          }
+  
+          socket.send(buffer);
+          console.log("Sent", buffer.byteLength, "bytes");
         };
-
-        function startRecording() {
-            if (isRecording) return;
-
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    mediaRecorder = new MediaRecorder(stream);
-                    mediaRecorder.ondataavailable = event => {
-                        audioChunks.push(event.data);
-                    };
-
-                    mediaRecorder.onstop = () => {
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                        ws.send(audioBlob);
-                        audioChunks = [];
-                    };
-
-                    mediaRecorder.start();
-                    isRecording = true;
-
-                    setInterval(() => {
-                        if (isRecording && mediaRecorder.state === "recording") {
-                            mediaRecorder.stop();
-                            mediaRecorder.start();
-                        }
-                    }, 1000);
-                })
-                .catch(err => console.log('Error accessing microphone:', err));
-        }
-
-        function stopRecording() {
-            if (!isRecording) return;
-            mediaRecorder.stop();
-            isRecording = false;
-        }
-    </script>
+  
+        socket.onopen = () => {
+          console.log("WebSocket opened");
+          recording = true;
+          document.getElementById("startBtn").disabled = true;
+          document.getElementById("stopBtn").disabled = false;
+        };
+  
+        socket.onclose = () => {
+          console.log("WebSocket closed");
+        };
+  
+        socket.onerror = (err) => {
+          console.error("WebSocket error:", err);
+        };
+  
+      } catch (err) {
+        console.error("Microphone access denied or failed", err);
+      }
+    };
+  
+    document.getElementById("stopBtn").onclick = () => {
+      recording = false;
+      if (processor) processor.disconnect();
+      if (input) input.disconnect();
+      if (audioContext) audioContext.close();
+      if (socket) socket.close();
+  
+      document.getElementById("startBtn").disabled = false;
+      document.getElementById("stopBtn").disabled = true;
+    };
+  </script>
+  
 </body>
 </html>
