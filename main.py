@@ -1,5 +1,6 @@
 import os
 import wave
+import io
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,8 +14,9 @@ async def root():
     with open("static/index.html") as f:
         return HTMLResponse(f.read())
 
-# Change this to control how many chunks to combine
-combine_chunks = 2  # Set to None for no combining
+combine_chunks = None   # Set None to disable combining
+SAVE_CHUNKS = False   # Set to False to avoid saving to disk
+
 
 @app.websocket("/ws/audio")
 async def websocket_endpoint(websocket: WebSocket):
@@ -30,37 +32,48 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_bytes()
             chunk_counter += 1
             buffer.extend(data)
+            print("Len of buffer:", len(buffer))
 
-            # If combining is disabled, save each chunk directly
             if combine_chunks is None:
-                save_chunk(data, suffix=None)
+                wav_bytes = convert_chunk_to_wav(data, suffix=None)
+                buffer.clear()
+                chunk_counter = 0
                 continue
 
-            # Combine chunks until the threshold
             if chunk_counter >= combine_chunks:
-                save_chunk(buffer, suffix=file_counter)
+                wav_bytes = convert_chunk_to_wav(buffer, suffix=file_counter)
                 buffer.clear()
                 chunk_counter = 0
                 file_counter += 1
+            
 
     except WebSocketDisconnect:
-        # Save any remaining data if connection closes mid-batch
         if combine_chunks is not None and buffer:
-            save_chunk(buffer, suffix=file_counter)
+            wav_bytes = convert_chunk_to_wav(buffer, suffix=file_counter)
+            # Handle last partial chunk if needed
         print("WebSocket disconnected")
 
 
-def save_chunk(data: bytes, suffix=None):
+def convert_chunk_to_wav(data: bytes, suffix=None) -> bytes:
     filename = (
         f"chunks/chunk_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.wav"
         if suffix is None
         else f"chunks/combined_chunk_{suffix}.wav"
     )
 
-    with wave.open(filename, 'wb') as wf:
+    # Write to in-memory buffer
+    buffer = io.BytesIO()
+    with wave.open(buffer, 'wb') as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(44100)
         wf.writeframes(data)
+    wav_data = buffer.getvalue()
+    if SAVE_CHUNKS:
+        with open(filename, 'wb') as f:
+            f.write(wav_data)
+        print(f"Saved: {filename}")
+    else:
+        print(f"Processed (not saved): {len(wav_data)} bytes")
 
-    print(f"Saved: {filename}")
+    return wav_data
