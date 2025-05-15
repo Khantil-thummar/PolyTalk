@@ -2,9 +2,11 @@ import os
 import torch
 import torchaudio
 import soundfile as sf
+import io
 from fastapi import WebSocket
 from transformers import AutoProcessor, SeamlessM4Tv2Model
 from utils import send_audio_to_client
+from config import SAVE_CHUNKS
 
 # Set up device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -62,14 +64,31 @@ class Translator:
             **audio_inputs, tgt_lang=self.target_lang
         )[0].cpu().numpy().squeeze()
 
-        # Save translated audio
-        sample_rate = self.model.config.sampling_rate
+        # Generate output path
         output_path = os.path.join(self.output_dir, output_filename)
-        sf.write(output_path, translated_audio, sample_rate)
-        print(f"Translated and saved: {output_path}")
         
-        # Send to client if websocket provided
-        if websocket:
-            await send_audio_to_client(websocket, output_path)
+        # Get sample rate from model config
+        sample_rate = self.model.config.sampling_rate
+        
+        if SAVE_CHUNKS:
+            # Save translated audio to disk if SAVE_CHUNKS is True
+            sf.write(output_path, translated_audio, sample_rate)
+            print(f"Translated and saved: {output_path}")
+            
+            # Send to client if websocket provided
+            if websocket:
+                await send_audio_to_client(websocket, output_path)
+        else:
+            # Don't save to disk, but still send to client
+            print(f"Translated audio (not saved to disk)")
+            
+            if websocket:
+                # Create in-memory WAV file
+                buffer = io.BytesIO()
+                sf.write(buffer, translated_audio, sample_rate, format='WAV')
+                buffer.seek(0)
+                
+                # Send directly from memory without saving to disk
+                await send_audio_to_client(websocket, buffer=buffer)
             
         return translated_audio 
