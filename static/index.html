@@ -30,84 +30,190 @@
     let recording = false;
     let bufferQueue = [];
     const chunkSize = 176400;
+    const audioQueue = [];
+    let isPlaying = false;
+    let reconnecting = false;
 
     document.getElementById("startBtn").onclick = async () => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log("Microphone access granted");
-
-        // socket = new WebSocket("wss://" + location.host + "/ws/audio");
-        socket = new WebSocket("ws://" + location.host + "/ws/audio");
-
-        socket.binaryType = "arraybuffer";
-
-        audioContext = new AudioContext({ sampleRate: 44100 });
-        input = audioContext.createMediaStreamSource(stream);
-        processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-        input.connect(processor);
-        processor.connect(audioContext.destination);
-
-        processor.onaudioprocess = (e) => {
-          if (!recording || socket.readyState !== WebSocket.OPEN) return;
-
-          const inputData = e.inputBuffer.getChannelData(0);
-          const buffer = new ArrayBuffer(inputData.length * 2);
-          const view = new DataView(buffer);
-
-          for (let i = 0; i < inputData.length; i++) {
-            let s = Math.max(-1, Math.min(1, inputData[i]));
-            view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-          }
-
-          bufferQueue.push(new Uint8Array(buffer));
-
-          // Accumulate ~88,200 bytes (1 second of audio)
-          const totalLength = bufferQueue.reduce((sum, b) => sum + b.length, 0);
-          if (totalLength >= chunkSize) {
-            const combined = new Uint8Array(totalLength);
-            let offset = 0;
-            for (let b of bufferQueue) {
-              combined.set(b, offset);
-              offset += b.length;
-            }
-
-            socket.send(combined.buffer); // Send to backend
-            bufferQueue = []; // Clear for next chunk
-            console.log("Sent chunk of", totalLength, "bytes");
-          }
-        };
-
-        socket.onopen = () => {
-          console.log("WebSocket opened");
-          recording = true;
-          document.getElementById("startBtn").disabled = true;
-          document.getElementById("stopBtn").disabled = false;
-        };
-
-        socket.onclose = () => {
-          console.log("WebSocket closed");
-        };
-
-        socket.onerror = (err) => {
-          console.error("WebSocket error:", err);
-        };
-
+        await setupRecording();
       } catch (err) {
         console.error("Microphone access denied or failed", err);
       }
     };
 
+    async function setupRecording() {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log("Microphone access granted");
+
+      // socket = new WebSocket("wss://" + location.host + "/ws/audio");
+      socket = new WebSocket("ws://" + location.host + "/ws/audio");
+      socket.binaryType = "arraybuffer";
+
+      audioContext = new AudioContext({ sampleRate: 44100 });
+      input = audioContext.createMediaStreamSource(stream);
+      processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      input.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess = (e) => {
+        if (!recording || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+        const inputData = e.inputBuffer.getChannelData(0);
+        const buffer = new ArrayBuffer(inputData.length * 2);
+        const view = new DataView(buffer);
+
+        for (let i = 0; i < inputData.length; i++) {
+          let s = Math.max(-1, Math.min(1, inputData[i]));
+          view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        }
+
+        bufferQueue.push(new Uint8Array(buffer));
+
+        // Accumulate ~88,200 bytes (1 second of audio)
+        const totalLength = bufferQueue.reduce((sum, b) => sum + b.length, 0);
+        if (totalLength >= chunkSize) {
+          const combined = new Uint8Array(totalLength);
+          let offset = 0;
+          for (let b of bufferQueue) {
+            combined.set(b, offset);
+            offset += b.length;
+          }
+
+          try {
+            socket.send(combined.buffer); // Send to backend
+            bufferQueue = []; // Clear for next chunk
+            console.log("Sent chunk of", totalLength, "bytes");
+          } catch (error) {
+            console.error("Error sending audio data:", error);
+            if (!reconnecting) {
+              handleDisconnection();
+            }
+          }
+        }
+      };
+
+      socket.onopen = () => {
+        console.log("WebSocket opened");
+        recording = true;
+        reconnecting = false;
+        document.getElementById("startBtn").disabled = true;
+        document.getElementById("stopBtn").disabled = false;
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === "translated_audio") {
+            console.log("Received translated audio");
+            // Add the audio to the queue
+            audioQueue.push(message.data);
+            // Start playing if not already playing
+            if (!isPlaying) {
+              playNextAudio();
+            }
+          }
+        } catch (error) {
+          console.error("Error processing message:", error);
+        }
+      };
+
+      socket.onclose = (event) => {
+        console.log("WebSocket closed:", event.code, event.reason);
+        if (recording && !reconnecting) {
+          handleDisconnection();
+        }
+      };
+
+      socket.onerror = (err) => {
+        console.error("WebSocket error:", err);
+      };
+    }
+
+    function handleDisconnection() {
+      console.log("Handling disconnection...");
+      reconnecting = true;
+      
+      // Allow time for the server to clean up the old connection
+      setTimeout(async () => {
+        if (recording) {
+          try {
+            console.log("Attempting to reconnect...");
+            await setupRecording();
+          } catch (error) {
+            console.error("Failed to reconnect:", error);
+            reconnecting = false;
+            recording = false;
+            document.getElementById("startBtn").disabled = false;
+            document.getElementById("stopBtn").disabled = true;
+          }
+        }
+      }, 2000);
+    }
+
     document.getElementById("stopBtn").onclick = () => {
+      stopRecording();
+    };
+
+    function stopRecording() {
       recording = false;
+      reconnecting = false;
+      
       if (processor) processor.disconnect();
       if (input) input.disconnect();
       if (audioContext) audioContext.close();
-      if (socket) socket.close();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
 
       document.getElementById("startBtn").disabled = false;
       document.getElementById("stopBtn").disabled = true;
-    };
+      
+      // Clear any remaining buffer
+      bufferQueue = [];
+    }
+
+    function playNextAudio() {
+      if (audioQueue.length === 0) {
+        isPlaying = false;
+        return;
+      }
+
+      isPlaying = true;
+      const base64Audio = audioQueue.shift();
+      const audioData = base64ToArrayBuffer(base64Audio);
+      
+      // Create an audio context
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      
+      // Decode the audio data
+      audioCtx.decodeAudioData(audioData, (buffer) => {
+        // Create a source node
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        
+        // Play the audio
+        source.onended = playNextAudio;
+        source.start(0);
+      }, (err) => {
+        console.error("Error decoding audio data:", err);
+        playNextAudio(); // Move to next audio on error
+      });
+    }
+
+    function base64ToArrayBuffer(base64) {
+      const binaryString = window.atob(base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      return bytes.buffer;
+    }
   </script>
 </body>
 </html>

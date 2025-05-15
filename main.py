@@ -1,6 +1,7 @@
 import os
 import wave
 import io
+import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,35 +40,47 @@ async def websocket_endpoint(websocket: WebSocket):
     buffer = bytearray()
     chunk_counter = 0
     file_counter = 0
+    
+    # Flag to track if the WebSocket is open
+    is_connected = True
 
     try:
-        while True:
-            data = await websocket.receive_bytes()
-            chunk_counter += 1
-            buffer.extend(data)
-            
-            if combine_chunks is None:
-                wav_bytes = convert_chunk_to_wav(data, suffix=None)
-                buffer.clear()
-                chunk_counter = 0
-                continue
+        while is_connected:
+            try:
+                data = await websocket.receive_bytes()
+                chunk_counter += 1
+                buffer.extend(data)
+                
+                if combine_chunks is None:
+                    await convert_chunk_to_wav(data, suffix=None, websocket=websocket)
+                    buffer.clear()
+                    chunk_counter = 0
+                    continue
 
-            if chunk_counter >= combine_chunks:
-                wav_bytes = convert_chunk_to_wav(buffer, suffix=file_counter)
-                buffer.clear()
-                chunk_counter = 0
-                file_counter += 1
-            
+                if chunk_counter >= combine_chunks:
+                    await convert_chunk_to_wav(buffer, suffix=file_counter, websocket=websocket)
+                    buffer.clear()
+                    chunk_counter = 0
+                    file_counter += 1
+            except WebSocketDisconnect:
+                is_connected = False
+                print("WebSocket disconnected while receiving data")
+                break
 
-    except WebSocketDisconnect:
-        if combine_chunks is not None and buffer:
-            wav_bytes = convert_chunk_to_wav(buffer, suffix=file_counter)
-            # Handle last partial chunk if needed
-        print("WebSocket disconnected")
+    except Exception as e:
+        print(f"Error in WebSocket handler: {e}")
+    
+    finally:
+        if buffer and is_connected:
+            try:
+                await convert_chunk_to_wav(buffer, suffix=file_counter, websocket=websocket)
+            except Exception as e:
+                print(f"Error processing final chunk: {e}")
+        print("WebSocket connection closed")
 
 
 
-def translate_and_save_wav(original_filepath: str, output_filename: str):
+async def translate_and_save_wav(original_filepath: str, output_filename: str, websocket: WebSocket = None):
     audio, orig_freq = torchaudio.load(original_filepath)
     audio = torchaudio.functional.resample(audio, orig_freq=orig_freq, new_freq=16_000)
 
@@ -82,8 +95,32 @@ def translate_and_save_wav(original_filepath: str, output_filename: str):
     output_path = os.path.join("converted_chunks", output_filename)
     sf.write(output_path, translated_audio, sample_rate)
     print(f"Translated and saved: {output_path}")
+    
+    # Send translated audio to the client if websocket is provided
+    if websocket:
+        try:
+            # Read the saved audio file and encode it as base64
+            with open(output_path, "rb") as audio_file:
+                audio_data = audio_file.read()
+                base64_audio = base64.b64encode(audio_data).decode('utf-8')
+                
+                # Send audio data to client
+                await websocket.send_json({
+                    "type": "translated_audio",
+                    "data": base64_audio,
+                    "format": "wav"
+                })
+        except WebSocketDisconnect:
+            print("WebSocket disconnected during audio transmission")
+        except RuntimeError as e:
+            if "after sending 'websocket.close'" in str(e):
+                print("WebSocket already closed, cannot send audio")
+            else:
+                raise
+            
+    return translated_audio
 
-def convert_chunk_to_wav(data: bytes, suffix=None) -> bytes:
+async def convert_chunk_to_wav(data: bytes, suffix=None, websocket: WebSocket = None):
     filename = (
         f"chunks/chunk_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.wav"
         if suffix is None
@@ -98,6 +135,7 @@ def convert_chunk_to_wav(data: bytes, suffix=None) -> bytes:
         wf.writeframes(data)
 
     wav_data = buffer.getvalue()
+    translated_audio = None
 
     if SAVE_CHUNKS:
         with open(filename, 'wb') as f:
@@ -106,7 +144,7 @@ def convert_chunk_to_wav(data: bytes, suffix=None) -> bytes:
 
         # Translate and save translated audio
         translated_name = os.path.basename(filename).replace("chunk", "translated")
-        translate_and_save_wav(filename, translated_name)
+        translated_audio = await translate_and_save_wav(filename, translated_name, websocket)
 
     else:
         print(f"Processed (not saved): {len(wav_data)} bytes")
