@@ -1,152 +1,62 @@
 import os
-import wave
-import io
-import base64
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from datetime import datetime
-from transformers import AutoProcessor, SeamlessM4Tv2Model
-import torchaudio
-import torch
-import soundfile as sf
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
-model = SeamlessM4Tv2Model.from_pretrained("facebook/seamless-m4t-v2-large").to(device)
-TARGET_LANG = "hin"
+# Import configuration
+from config import (
+    MODEL_NAME, 
+    TARGET_LANGUAGE,
+    COMBINE_CHUNKS,
+    SAVE_CHUNKS,
+    HTML_TEMPLATE_DIR,
+    CHUNK_DIR,
+    OUTPUT_DIR
+)
 
+# Import modules
+from translator import Translator
+from websocket_handler import AudioWebSocketHandler
 
-os.makedirs("converted_chunks", exist_ok=True)
+# Ensure required directories exist
+os.makedirs(CHUNK_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Initialize the application
+app = FastAPI(title="Real-time Voice Translator")
+app.mount("/static", StaticFiles(directory=HTML_TEMPLATE_DIR), name="static")
 
-app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Initialize translator
+translator = Translator(
+    model_name=MODEL_NAME,
+    target_lang=TARGET_LANGUAGE
+)
+
+# Initialize WebSocket handler
+ws_handler = AudioWebSocketHandler(
+    translate_func=translator.translate_audio
+)
+ws_handler.combine_chunks = COMBINE_CHUNKS
+ws_handler.save_chunks = SAVE_CHUNKS
 
 @app.get("/")
 async def root():
-    with open("static/index.html") as f:
+    """Serve the main page"""
+    with open(f"{HTML_TEMPLATE_DIR}/index.html") as f:
         return HTMLResponse(f.read())
-
-combine_chunks = 2   # Set None to disable combining
-SAVE_CHUNKS = True   # Set to False to avoid saving to disk
-
 
 @app.websocket("/ws/audio")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    os.makedirs("chunks", exist_ok=True)
+    """Handle WebSocket connections for audio streaming"""
+    await ws_handler.handle_connection(websocket)
 
-    buffer = bytearray()
-    chunk_counter = 0
-    file_counter = 0
+# Load the model when the server starts
+@app.on_event("startup")
+async def startup_event():
+    """Initialize resources on server startup"""
+    translator.load_model()
+    print(f"Server started. Translating to: {TARGET_LANGUAGE}")
     
-    # Flag to track if the WebSocket is open
-    is_connected = True
-
-    try:
-        while is_connected:
-            try:
-                data = await websocket.receive_bytes()
-                chunk_counter += 1
-                buffer.extend(data)
-                
-                if combine_chunks is None:
-                    await convert_chunk_to_wav(data, suffix=None, websocket=websocket)
-                    buffer.clear()
-                    chunk_counter = 0
-                    continue
-
-                if chunk_counter >= combine_chunks:
-                    await convert_chunk_to_wav(buffer, suffix=file_counter, websocket=websocket)
-                    buffer.clear()
-                    chunk_counter = 0
-                    file_counter += 1
-            except WebSocketDisconnect:
-                is_connected = False
-                print("WebSocket disconnected while receiving data")
-                break
-
-    except Exception as e:
-        print(f"Error in WebSocket handler: {e}")
-    
-    finally:
-        if buffer and is_connected:
-            try:
-                await convert_chunk_to_wav(buffer, suffix=file_counter, websocket=websocket)
-            except Exception as e:
-                print(f"Error processing final chunk: {e}")
-        print("WebSocket connection closed")
-
-
-
-async def translate_and_save_wav(original_filepath: str, output_filename: str, websocket: WebSocket = None):
-    audio, orig_freq = torchaudio.load(original_filepath)
-    audio = torchaudio.functional.resample(audio, orig_freq=orig_freq, new_freq=16_000)
-
-    # Ensure mono channel
-    if audio.shape[0] > 1:
-        audio = audio.mean(dim=0, keepdim=True)
-
-    audio_inputs = processor(audios=audio, return_tensors="pt").to(device)
-    translated_audio = model.generate(**audio_inputs, tgt_lang=TARGET_LANG)[0].cpu().numpy().squeeze()
-
-    sample_rate = model.config.sampling_rate
-    output_path = os.path.join("converted_chunks", output_filename)
-    sf.write(output_path, translated_audio, sample_rate)
-    print(f"Translated and saved: {output_path}")
-    
-    # Send translated audio to the client if websocket is provided
-    if websocket:
-        try:
-            # Read the saved audio file and encode it as base64
-            with open(output_path, "rb") as audio_file:
-                audio_data = audio_file.read()
-                base64_audio = base64.b64encode(audio_data).decode('utf-8')
-                
-                # Send audio data to client
-                await websocket.send_json({
-                    "type": "translated_audio",
-                    "data": base64_audio,
-                    "format": "wav"
-                })
-        except WebSocketDisconnect:
-            print("WebSocket disconnected during audio transmission")
-        except RuntimeError as e:
-            if "after sending 'websocket.close'" in str(e):
-                print("WebSocket already closed, cannot send audio")
-            else:
-                raise
-            
-    return translated_audio
-
-async def convert_chunk_to_wav(data: bytes, suffix=None, websocket: WebSocket = None):
-    filename = (
-        f"chunks/chunk_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.wav"
-        if suffix is None
-        else f"chunks/combined_chunk_{suffix}.wav"
-    )
-
-    buffer = io.BytesIO()
-    with wave.open(buffer, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(44100)
-        wf.writeframes(data)
-
-    wav_data = buffer.getvalue()
-    translated_audio = None
-
-    if SAVE_CHUNKS:
-        with open(filename, 'wb') as f:
-            f.write(wav_data)
-        print(f"Saved: {filename}")
-
-        # Translate and save translated audio
-        translated_name = os.path.basename(filename).replace("chunk", "translated")
-        translated_audio = await translate_and_save_wav(filename, translated_name, websocket)
-
-    else:
-        print(f"Processed (not saved): {len(wav_data)} bytes")
-
-    return wav_data
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
