@@ -36,7 +36,9 @@
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         console.log("Microphone access granted");
 
-        socket = new WebSocket("wss://" + location.host + "/ws/audio");
+        // socket = new WebSocket("wss://" + location.host + "/ws/audio");
+        socket = new WebSocket("ws://" + location.host + "/ws/audio");
+
         socket.binaryType = "arraybuffer";
 
         audioContext = new AudioContext({ sampleRate: 44100 });
