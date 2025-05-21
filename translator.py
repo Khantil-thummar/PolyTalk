@@ -7,6 +7,7 @@ from fastapi import WebSocket
 from transformers import AutoProcessor, SeamlessM4Tv2Model
 from utils import send_audio_to_client
 from config import SAVE_CHUNKS
+from wav2lip_inferencer import Wav2LipInferencer
 
 # Set up device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,6 +27,14 @@ class Translator:
         self.model = None
         self.output_dir = "converted_chunks"
         os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Initialize Wav2LipInferencer once
+        self.wav2lip_inferencer = Wav2LipInferencer(
+            checkpoint_path='checkpoints/wav2lip_gan.pth'
+        )
+        self.REFERENCE_VIDEO_PATH = 'test_input/demo8.mp4'
+        self.RESULTS_DIR = 'results'
+        os.makedirs(self.RESULTS_DIR, exist_ok=True)
         
     def load_model(self):
         """Load the translation model and processor"""
@@ -74,6 +83,20 @@ class Translator:
             # Save translated audio to disk if SAVE_CHUNKS is True
             sf.write(output_path, translated_audio, sample_rate)
             print(f"Translated and saved: {output_path}")
+            
+            # Run lipsync on the translated chunk
+            lipsynced_output = os.path.join(
+                self.RESULTS_DIR, f"lipsynced_{output_filename.replace('.wav', '.mp4')}"
+            )
+            try:
+                self.wav2lip_inferencer.infer(
+                    face_path=self.REFERENCE_VIDEO_PATH,
+                    audio_path=output_path,
+                    outfile=lipsynced_output
+                )
+                print(f"Lipsynced video saved: {lipsynced_output}")
+            except Exception as e:
+                print(f"Lipsync failed for {output_path}: {e}")
             
             # Send to client if websocket provided
             if websocket:
