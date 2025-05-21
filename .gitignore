@@ -1,1 +1,10 @@
 .env
+checkpoints/
+face_detection/detection/sfd/s3fd.pth
+results/
+__pycache__/
+temp/
+test_input/
+*.ipynb
+chunks/
+converted_chunks/
