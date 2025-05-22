@@ -13,8 +13,8 @@ class AudioWebSocketHandler:
         """
         self.translate_func = translate_func
         self.combine_chunks = 2  # How many chunks to combine before processing
-        self.save_chunks = True  # Whether to save audio chunks to disk
-        
+        # self.save_chunks will be set externally (from main.py)
+
     async def handle_connection(self, websocket: WebSocket):
         """
         Handle a WebSocket connection for audio streaming.
@@ -28,12 +28,9 @@ class AudioWebSocketHandler:
         buffer = bytearray()
         chunk_counter = 0
         file_counter = 0
-        
-        # Flag to track if the WebSocket is open
-        is_connected = True
 
         try:
-            while is_connected:
+            while True:
                 try:
                     data = await websocket.receive_bytes()
                     chunk_counter += 1
@@ -43,7 +40,6 @@ class AudioWebSocketHandler:
                         await convert_chunk_to_wav(
                             data, 
                             suffix=None, 
-                            websocket=websocket,
                             save_chunks=self.save_chunks,
                             translate_func=self.translate_func
                         )
@@ -55,7 +51,6 @@ class AudioWebSocketHandler:
                         await convert_chunk_to_wav(
                             buffer, 
                             suffix=file_counter, 
-                            websocket=websocket,
                             save_chunks=self.save_chunks,
                             translate_func=self.translate_func
                         )
@@ -63,20 +58,18 @@ class AudioWebSocketHandler:
                         chunk_counter = 0
                         file_counter += 1
                 except WebSocketDisconnect:
-                    is_connected = False
                     print("WebSocket disconnected while receiving data")
                     break
-
         except Exception as e:
             print(f"Error in WebSocket handler: {e}")
         
         finally:
-            if buffer and is_connected:
+            if buffer:
+                print(f"Processing final buffer of size {len(buffer)}")
                 try:
                     await convert_chunk_to_wav(
                         buffer, 
                         suffix=file_counter, 
-                        websocket=websocket,
                         save_chunks=self.save_chunks,
                         translate_func=self.translate_func
                     )

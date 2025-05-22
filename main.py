@@ -18,9 +18,10 @@ from config import (
 from translator import Translator
 from websocket_handler import AudioWebSocketHandler
 
-# Ensure required directories exist
+# Ensure required directories exist (for audio chunks, translated files, and lipsync results)
 os.makedirs(CHUNK_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs('results', exist_ok=True)
 
 # Initialize the application
 app = FastAPI(title="Real-time Voice Translator")
@@ -56,7 +57,4 @@ async def startup_event():
     """Initialize resources on server startup"""
     translator.load_model()
     print(f"Server started. Translating to: {TARGET_LANGUAGE}")
-    
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
