@@ -79,14 +79,9 @@ class Translator:
         # Get sample rate from model config
         sample_rate = self.model.config.sampling_rate
         
-        if SAVE_CHUNKS:
-            # Save translated audio to disk if SAVE_CHUNKS is True
-            sf.write(output_path, translated_audio, sample_rate)
-            logging.info(f"Translated and saved: {output_path}")
-        else:
-            # Save temporarily for lipsync processing
-            sf.write(output_path, translated_audio, sample_rate)
-            logging.info(f"Translated audio temporarily saved for lipsync: {output_path}")
+        # Always save the audio (either for keeping or for lipsync processing)
+        sf.write(output_path, translated_audio, sample_rate)
+        logging.info(f"Translated audio saved to: {output_path} (will {'be kept' if SAVE_CHUNKS else 'be deleted after processing'})")
 
         # Always run lipsync on the translated chunk and save to results
         lipsynced_output = os.path.join(
